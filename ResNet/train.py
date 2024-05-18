@@ -5,16 +5,30 @@ from tensorflow.keras.losses import SparseCategoricalCrossentropy, BinaryCrossen
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop, Adadelta, Adamax
 from argparse import ArgumentParser
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras.callbacks import ModelCheckpoint, CSVLogger
 import pickle
 import os
+import time
+from datetime import datetime
+import wandb 
+from wandb.keras import WandbMetricsLogger
+import json
+from tensorflow import keras
 
-if __name__ == "__main__":
-    parser = ArgumentParser()
+current_time = time.strftime('%Y-%m-%d-%H:%M:%S') #update
 
+parser = ArgumentParser() #update
+path_current = os.path.abspath(globals().get("__file__",".")) #update
+script_dir = os.path.dirname(path_current) #update
+root_path = os.path.abspath(f"{script_dir}/../../..") #update
+
+experiments_dir = os.path.abspath(f"{script_dir}/../../exps/Resnet/experiment_{current_time}") #update
+data_path = root_path + "/input/dog-cat-dataset/cats_and_dogs_filtered" #update
+
+if __name__ == "__main__": 
     # Arguments users used when running command lines
-    parser.add_argument('--train-folder', default='/kaggle/input/dog-cat-dataset/cats_and_dogs_filtered/train', type=str, help='Where training data is located')
-    parser.add_argument('--valid-folder', default='/kaggle/input/dog-cat-dataset/cats_and_dogs_filtered/validation', type=str, help='Where validation data is located')
+    parser.add_argument('--train-folder', default='/kaggle/working/rafdb/train', type=str, help='Where training data is located')
+    parser.add_argument('--valid-folder', default='/kaggle/working/rafdb/test', type=str, help='Where validation data is located')
     parser.add_argument('--model', default='resnet50', type=str, help='Type of model')
     parser.add_argument('--num-classes', default=2, type=int, help='Number of classes')
     parser.add_argument("--batch-size", default=32, type=int)
@@ -26,10 +40,32 @@ if __name__ == "__main__":
     parser.add_argument('--class-mode', default='sparse', type=str, help='Class mode to compile')
     parser.add_argument('--model-path', default='best_model.h5.keras', type=str, help='Path to save trained model')
     parser.add_argument('--class-names-path', default='class_names.pkl', type=str, help='Path to save class names')
+    parser.add_argument('--exp-dir', default = experiments_dir, type = str, help ='folder contain experiemts')
 
+    #use wandb 
+    parser.add_argument('--author-name', default='unknown', type=str, help='name of an author')
+    parser.add_argument('--use-wandb', default=0, type=int, help='Use wandb')
+    parser.add_argument('--wandb-api-key', default = 'fa74a08b8f57907bfa5a6d21d2b665083ed64764', type=str, help='wantdb api key')
+    parser.add_argument('--wandb-project-name', default = 'quanproject', type=str, help='name project to store data in wantdb')
 
     # parser.add_argument('--model-folder', default='.output/', type=str, help='Folder to save trained model')
     args = parser.parse_args()
+
+    #use wandb
+    configs = vars(args)
+    if(args.author_name == ""):
+        raise Exception("author name ??????")
+     # Initialize a W&B run
+    if args.use_wandb == 1:
+        if (args.wandb_api_key ==""):
+            raise Exception("if you use Wandb, please entering wandb api key first!")
+        if (args.wandb_project_name ==""):
+            raise Exception("if you use Wandb, please entering wandb name project first!")
+        wandb.login(key=args.wandb_api_key)
+        run = wandb.init(
+            project = args.wandb_project_name,
+            config = configs
+        )
 
     # Project Description
 
@@ -77,9 +113,19 @@ if __name__ == "__main__":
         model = resnet152(num_classes = classes)
     else:
         print('Wrong resnet name, please choose one of these model: resnet18, resnet34, resnet50, resnet101, resnet152')
+    # save all arguments to json file
+    print(args.exp_dir)
+    os.makedirs(args.exp_dir, exist_ok=True)
 
+    args_dict = vars(args)
+
+    # Write dictionary to file
+    file_path = os.path.join(experiments_dir, "arguments.json")
+    print(file_path)
+    with open(file_path, 'w') as file:
+        json.dump(args_dict, file, indent=4)
+        
     model.build(input_shape=(None, args.image_size, args.image_size, args.image_channels))
-
 
     if (args.optimizer == 'adam'):
         optimizer = Adam(learning_rate=args.lr)
@@ -95,21 +141,59 @@ if __name__ == "__main__":
         raise 'Invalid optimizer. Valid option: adam, sgd, rmsprop, adadelta, adamax'
 
 
-
     model.compile(optimizer=optimizer, 
                 loss=SparseCategoricalCrossentropy(),
                 metrics=['accuracy'])
-    
-    best_model = ModelCheckpoint(args.model_path,
+    # callbacks
+    callbacks = []
+    save_bestmodel_path = f'{args.exp_dir}/{args.model_path}'
+    best_model = ModelCheckpoint(save_bestmodel_path,
                                  save_weights_only=False,
                                  monitor='val_accuracy',
                                  verbose=1,
                                  mode='max',
                                  save_best_only=True)
+    callbacks.append(best_model)
+    
+
+    # wandb
+    if args.use_wandb == 1:
+        cb_wandb = WandbMetricsLogger(log_freq=1)
+        callbacks.append(cb_wandb)
+
+    exp_dir = args.exp_dir
+    log_file_path = os.path.join(experiments_dir, 'log.csv')
+
+    # Create the experiment directory if it doesn't exist
+    if not os.path.exists(exp_dir):
+        os.makedirs(exp_dir)
+
+    # Create the log file path
+    log_file_path = os.path.join(exp_dir, 'log.csv')
+    # logger
+    cb_log = CSVLogger(log_file_path)
+    callbacks.append(cb_log)
+
+    #Add earlystopping
+    callbacks.append(keras.callbacks.EarlyStopping(
+    monitor="val_loss",
+    min_delta=0,
+    patience=30,
+    verbose=0,
+    mode="auto",
+    baseline=None,
+    restore_best_weights=False,
+    start_from_epoch=0,
+))
     # Traning
     model.fit(
         train_generator,
         epochs=args.epochs,
         verbose=1,
         validation_data=val_generator,
-        callbacks=[best_model])
+        callbacks=callbacks)
+     #Close your wandb run 
+    if args.use_wandb == 1:
+        wandb.finish()
+    
+    pass
